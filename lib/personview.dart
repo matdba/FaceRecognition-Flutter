@@ -1,59 +1,48 @@
+import 'package:facerecognition_flutter/presentation/controllers/home/home_controller.dart';
 import 'package:flutter/material.dart';
-import 'person.dart';
-import 'main.dart';
+import 'package:get/get.dart';
 
-// ignore: must_be_immutable
-class PersonView extends StatefulWidget {
-  final List<Person> personList;
-  final MyHomePageState homePageState;
+class PersonView extends StatelessWidget {
+  const PersonView({super.key});
 
-  const PersonView(
-      {super.key, required this.personList, required this.homePageState});
-
-  @override
-  _PersonViewState createState() => _PersonViewState();
-}
-
-class _PersonViewState extends State<PersonView> {
-  deletePerson(int index) async {
-    await widget.homePageState.deletePerson(index);
+  deletePerson(String identifier) async {
+    Get.find<HomeController>().deletePerson(identifier);
   }
 
   @override
   Widget build(BuildContext context) {
-    return ListView.builder(
-        itemCount: widget.personList.length,
+    return Obx(
+      () => ListView.builder(
+        itemCount: Get.find<HomeController>().personList.length,
         itemBuilder: (BuildContext context, int index) {
           return SizedBox(
-              height: 75,
-              child: Card(
-                  child: Row(
+            height: 75,
+            child: Card(
+              child: Row(
                 children: [
-                  const SizedBox(
-                    width: 16,
-                  ),
+                  const SizedBox(width: 16),
                   ClipRRect(
                     borderRadius: BorderRadius.circular(28.0),
                     child: Image.memory(
-                      widget.personList[index].faceJpg,
+                      Get.find<HomeController>().personList[index].faceJpg,
                       width: 56,
                       height: 56,
                     ),
                   ),
-                  const SizedBox(
-                    width: 16,
-                  ),
-                  Text(widget.personList[index].name),
+                  const SizedBox(width: 16),
+                  Text(Get.find<HomeController>().personList[index].name),
                   const Spacer(),
                   IconButton(
                     icon: const Icon(Icons.delete),
-                    onPressed: () => deletePerson(index),
+                    onPressed: () => deletePerson(Get.find<HomeController>().personList[index].identifier),
                   ),
-                  const SizedBox(
-                    width: 8,
-                  )
+                  const SizedBox(width: 8)
                 ],
-              )));
-        });
+              ),
+            ),
+          );
+        },
+      ),
+    );
   }
 }

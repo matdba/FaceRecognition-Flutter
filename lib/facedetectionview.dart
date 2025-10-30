@@ -1,10 +1,14 @@
 import 'dart:async';
 import 'dart:io';
+import 'dart:developer';
 
+import 'package:camera/camera.dart';
+import 'package:facerecognition_flutter/app/app_colors.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:facesdk_plugin/facedetection_interface.dart';
+import 'package:google_mlkit_face_detection/google_mlkit_face_detection.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:facesdk_plugin/facesdk_plugin.dart';
 import 'person.dart';
@@ -43,6 +47,7 @@ class FaceRecognitionViewState extends State<FaceRecognitionView> {
     super.initState();
 
     loadSettings();
+    _initializeDetector();
   }
 
   Future<void> loadSettings() async {
@@ -90,9 +95,7 @@ class FaceRecognitionViewState extends State<FaceRecognitionView> {
     if (faces.length > 0) {
       var face = faces[0];
       for (var person in widget.personList) {
-        double similarity = await _facesdkPlugin.similarityCalculation(
-                face['templates'], person.templates) ??
-            -1;
+        double similarity = await _facesdkPlugin.similarityCalculation(face['templates'], person.templates) ?? -1;
         if (maxSimilarity < similarity) {
           maxSimilarity = similarity;
           maxSimilarityName = person.name;
@@ -105,8 +108,7 @@ class FaceRecognitionViewState extends State<FaceRecognitionView> {
         }
       }
 
-      if (maxSimilarity > _identifyThreshold &&
-          maxLiveness > _livenessThreshold) {
+      if (maxSimilarity > _identifyThreshold && maxLiveness > _livenessThreshold) {
         recognized = true;
       }
     }
@@ -126,6 +128,7 @@ class FaceRecognitionViewState extends State<FaceRecognitionView> {
       });
       if (recognized) {
         faceDetectionViewController?.stopCamera();
+        _initializeCamera();
         setState(() {
           _faces = null;
         });
@@ -133,6 +136,167 @@ class FaceRecognitionViewState extends State<FaceRecognitionView> {
     });
 
     return recognized;
+  }
+
+  CameraController? _cameraController;
+  late FaceDetector _faceDetector;
+  bool _isDetecting = false;
+  bool _smiling = false;
+  bool _loading = true;
+  int _cameraIndex = -1;
+  List<CameraDescription> _cameras = [];
+
+  void _initializeDetector() {
+    _faceDetector = FaceDetector(
+      options: FaceDetectorOptions(
+        enableClassification: true,
+        performanceMode: FaceDetectorMode.accurate, // Try accurate mode instead of fast
+        minFaceSize: 0.15, // Increase minimum face size for better detection
+      ),
+    );
+  }
+
+  Future<void> _initializeCamera() async {
+    try {
+      _cameras = await availableCameras();
+
+      // Find front camera
+      for (var i = 0; i < _cameras.length; i++) {
+        if (_cameras[i].lensDirection == CameraLensDirection.front) {
+          _cameraIndex = i;
+          break;
+        }
+      }
+
+      // If no front camera found, use the first available camera
+      if (_cameraIndex == -1) {
+        _cameraIndex = 0;
+      }
+
+      await _startLiveFeed();
+    } catch (e) {
+      log('Error initializing camera: $e');
+    }
+  }
+
+  Future<void> _startLiveFeed() async {
+    final camera = _cameras[_cameraIndex];
+    _cameraController = CameraController(
+      camera,
+      ResolutionPreset.high, // Try higher resolution
+      enableAudio: false,
+      imageFormatGroup: Platform.isAndroid
+          ? ImageFormatGroup.nv21 // For Android
+          : ImageFormatGroup.bgra8888, // For iOS
+    );
+
+    try {
+      await _cameraController!.initialize();
+
+      if (!mounted) return;
+
+      setState(() {
+        _loading = false;
+      });
+
+      _cameraController!.startImageStream(_processCameraImage);
+    } catch (e) {
+      log('Error starting camera stream: $e');
+    }
+  }
+
+  Future<void> _processCameraImage(CameraImage image) async {
+    if (_isDetecting) return;
+    _isDetecting = true;
+
+    try {
+      final inputImage = _getInputImage(image);
+      if (inputImage == null) return;
+
+      final List<Face> faces = await _faceDetector.processImage(inputImage);
+
+      if (faces.isNotEmpty) {
+        // Log information about the face
+        log('Face detected! Count: ${faces.length}');
+        final face = faces.first;
+        final smileProb = face.smilingProbability ?? 0.0;
+        log('Smile probability: $smileProb');
+
+        if (mounted) {
+          setState(() {
+            _smiling = smileProb > 0.6;
+          });
+        }
+      } else {
+        if (mounted) {
+          setState(() {
+            _smiling = false;
+          });
+        }
+        log('No faces detected');
+      }
+    } catch (e) {
+      log('Face detection error: $e');
+    } finally {
+      _isDetecting = false;
+    }
+  }
+
+  InputImage? _getInputImage(CameraImage image) {
+    if (_cameraController == null) return null;
+
+    // Get the camera rotation
+    final camera = _cameras[_cameraIndex];
+    final rotation = InputImageRotationValue.fromRawValue(
+      Platform.isAndroid ? _cameraController!.description.sensorOrientation : 0,
+    );
+
+    if (rotation == null) return null;
+
+    // Handle different image formats for Android and iOS
+    if (Platform.isAndroid) {
+      final bytes = _concatenatePlanes(image.planes);
+      final format = InputImageFormat.nv21;
+
+      return InputImage.fromBytes(
+        bytes: bytes,
+        metadata: InputImageMetadata(
+          size: Size(image.width.toDouble(), image.height.toDouble()),
+          rotation: rotation,
+          format: format,
+          bytesPerRow: image.planes[0].bytesPerRow,
+        ),
+      );
+    } else if (Platform.isIOS) {
+      final format = InputImageFormat.bgra8888;
+
+      return InputImage.fromBytes(
+        bytes: image.planes[0].bytes,
+        metadata: InputImageMetadata(
+          size: Size(image.width.toDouble(), image.height.toDouble()),
+          rotation: rotation,
+          format: format,
+          bytesPerRow: image.planes[0].bytesPerRow,
+        ),
+      );
+    }
+
+    return null;
+  }
+
+  Uint8List _concatenatePlanes(List<Plane> planes) {
+    final allBytes = WriteBuffer();
+    for (final plane in planes) {
+      allBytes.putUint8List(plane.bytes);
+    }
+    return allBytes.done().buffer.asUint8List();
+  }
+
+  @override
+  void dispose() {
+    _cameraController?.dispose();
+    _faceDetector.close();
+    super.dispose();
   }
 
   @override
@@ -150,171 +314,215 @@ class FaceRecognitionViewState extends State<FaceRecognitionView> {
         ),
         body: Stack(
           children: <Widget>[
-            FaceDetectionView(faceRecognitionViewState: this),
-            SizedBox(
-              width: double.infinity,
-              height: double.infinity,
-              child: CustomPaint(
-                painter: FacePainter(
-                    faces: _faces, livenessThreshold: _livenessThreshold),
-              ),
-            ),
+            !_recognized
+                ? FaceDetectionView(faceRecognitionViewState: this)
+                : _loading
+                    ? Center(child: CircularProgressIndicator())
+                    : Center(
+                        child: Container(
+                          width: double.infinity,
+                          height: double.infinity,
+                          child: FittedBox(
+                            fit: BoxFit.contain,
+                            child: SizedBox(
+                              width: _cameraController!.value.previewSize!.height,
+                              height: _cameraController!.value.previewSize!.width,
+                              child: Stack(
+                                fit: StackFit.expand,
+                                children: [
+                                  // Apply transform to un-mirror the front camera
+                                  Transform(
+                                    alignment: Alignment.center,
+                                    // This matrix flips the image horizontally to remove the mirror effect
+                                    transform: Matrix4.identity()..scale(-1.0, 1.0),
+                                    child: CameraPreview(_cameraController!),
+                                  ),
+                                ],
+                              ),
+                            ),
+                          ),
+                        ),
+                      ),
+
+            // SizedBox(
+            //   width: double.infinity,
+            //   height: double.infinity,
+            //   child: CustomPaint(
+            //     painter: FacePainter(faces: _faces, livenessThreshold: _livenessThreshold),
+            //   ),
+            // ),
             Visibility(
-                visible: _recognized,
+              visible: true,
+              child: Container(
+                alignment: Alignment.bottomCenter,
                 child: Container(
                   width: double.infinity,
-                  height: double.infinity,
-                  color: Theme.of(context).colorScheme.background,
+                  margin: EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+                  height: 85,
+                  decoration: BoxDecoration(
+                    color: AppColors.white,
+                    borderRadius: BorderRadius.circular(50),
+                    boxShadow: [
+                      BoxShadow(
+                        color: AppColors.tertiary.withValues(alpha: .5),
+                        blurRadius: 1,
+                        spreadRadius: 1,
+                      )
+                    ],
+                  ),
                   child: Column(
-                      mainAxisAlignment: MainAxisAlignment.start,
-                      children: [
-                        const SizedBox(
-                          height: 10,
+                    mainAxisAlignment: MainAxisAlignment.center,
+                    crossAxisAlignment: CrossAxisAlignment.center,
+                    children: [
+                      Row(
+                        mainAxisAlignment: MainAxisAlignment.spaceEvenly,
+                        children: <Widget>[
+                          // _enrolledFace != null
+                          //     ? Column(
+                          //         children: [
+                          //           ClipRRect(
+                          //             borderRadius: BorderRadius.circular(8.0),
+                          //             child: Image.memory(
+                          //               _enrolledFace,
+                          //               width: 160,
+                          //               height: 160,
+                          //             ),
+                          //           ),
+                          //           const SizedBox(
+                          //             height: 5,
+                          //           ),
+                          //           const Text('Enrolled')
+                          //         ],
+                          //       )
+                          //     : const SizedBox(height: 1),
+                          // _identifiedFace != null
+                          //     ? Column(
+                          //         children: [
+                          //           ClipRRect(
+                          //             borderRadius: BorderRadius.circular(8.0),
+                          //             child: Image.memory(
+                          //               _identifiedFace,
+                          //               width: 160,
+                          //               height: 160,
+                          //             ),
+                          //           ),
+                          //           const SizedBox(
+                          //             height: 5,
+                          //           ),
+                          //           const Text('Identified')
+                          //         ],
+                          //       )
+                          //     : const SizedBox(height: 1)
+                        ],
+                      ),
+                      Text(
+                        _smiling
+                            ? 'لبخند تشخیص داده شد'
+                            : _recognized
+                                ? 'خوش آمدید $_identifiedName'
+                                : 'در حال شناسایی',
+                        style: TextStyle(
+                          fontSize: 18,
+                          fontWeight: FontWeight.bold,
+                          color: AppColors.primaryLight,
+                          fontFamily: 'Sans',
                         ),
-                        Row(
-                          mainAxisAlignment: MainAxisAlignment.spaceEvenly,
-                          children: <Widget>[
-                            _enrolledFace != null
-                                ? Column(
-                                    children: [
-                                      ClipRRect(
-                                        borderRadius:
-                                            BorderRadius.circular(8.0),
-                                        child: Image.memory(
-                                          _enrolledFace,
-                                          width: 160,
-                                          height: 160,
-                                        ),
-                                      ),
-                                      const SizedBox(
-                                        height: 5,
-                                      ),
-                                      const Text('Enrolled')
-                                    ],
-                                  )
-                                : const SizedBox(
-                                    height: 1,
-                                  ),
-                            _identifiedFace != null
-                                ? Column(
-                                    children: [
-                                      ClipRRect(
-                                        borderRadius:
-                                            BorderRadius.circular(8.0),
-                                        child: Image.memory(
-                                          _identifiedFace,
-                                          width: 160,
-                                          height: 160,
-                                        ),
-                                      ),
-                                      const SizedBox(
-                                        height: 5,
-                                      ),
-                                      const Text('Identified')
-                                    ],
-                                  )
-                                : const SizedBox(
-                                    height: 1,
-                                  )
-                          ],
-                        ),
-                        const SizedBox(
-                          height: 10,
-                        ),
-                        Row(
-                          children: [
-                            const SizedBox(
-                              width: 16,
-                            ),
-                            Text(
-                              'Identified: $_identifiedName',
-                              style: const TextStyle(fontSize: 18),
+                      ),
+                      const SizedBox(height: 10),
+                      _recognized && !_smiling
+                          ? Text(
+                              'لطفا لبخند بزنید',
+                              style: TextStyle(
+                                fontSize: 16,
+                                fontWeight: FontWeight.w500,
+                                color: AppColors.black,
+                                fontFamily: 'Sans',
+                              ),
                             )
-                          ],
-                        ),
-                        const SizedBox(
-                          height: 10,
-                        ),
-                        Row(
-                          children: [
-                            const SizedBox(
-                              width: 16,
-                            ),
-                            Text(
-                              'Similarity: $_identifiedSimilarity',
-                              style: const TextStyle(fontSize: 18),
-                            )
-                          ],
-                        ),
-                        const SizedBox(
-                          height: 10,
-                        ),
-                        Row(
-                          children: [
-                            const SizedBox(
-                              width: 16,
-                            ),
-                            Text(
-                              'Liveness score: $_identifiedLiveness',
-                              style: const TextStyle(fontSize: 18),
-                            )
-                          ],
-                        ),
-                        const SizedBox(
-                          height: 10,
-                        ),
-                        Row(
-                          children: [
-                            const SizedBox(
-                              width: 16,
-                            ),
-                            Text(
-                              'Yaw: $_identifiedYaw',
-                              style: const TextStyle(fontSize: 18),
-                            )
-                          ],
-                        ),
-                        const SizedBox(
-                          height: 10,
-                        ),
-                        Row(
-                          children: [
-                            const SizedBox(
-                              width: 16,
-                            ),
-                            Text(
-                              'Roll: $_identifiedRoll',
-                              style: const TextStyle(fontSize: 18),
-                            )
-                          ],
-                        ),
-                        const SizedBox(
-                          height: 10,
-                        ),
-                        Row(
-                          children: [
-                            const SizedBox(
-                              width: 16,
-                            ),
-                            Text(
-                              'Pitch: $_identifiedPitch',
-                              style: const TextStyle(fontSize: 18),
-                            )
-                          ],
-                        ),
-                        const SizedBox(
-                          height: 16,
-                        ),
-                        ElevatedButton(
-                          style: ElevatedButton.styleFrom(
-                            backgroundColor:
-                                Theme.of(context).colorScheme.primaryContainer,
-                          ),
-                          onPressed: () => faceRecognitionStart(),
-                          child: const Text('Try again'),
-                        ),
-                      ]),
-                )),
+                          : const SizedBox(),
+                      // const SizedBox(
+                      //   height: 10,
+                      // ),
+                      // Row(
+                      //   children: [
+                      //     const SizedBox(
+                      //       width: 16,
+                      //     ),
+                      //     Text(
+                      //       'Similarity: $_identifiedSimilarity',
+                      //       style: const TextStyle(fontSize: 18),
+                      //     )
+                      //   ],
+                      // ),
+                      // const SizedBox(
+                      //   height: 10,
+                      // ),
+                      // Row(
+                      //   children: [
+                      //     const SizedBox(
+                      //       width: 16,
+                      //     ),
+                      //     Text(
+                      //       'Liveness score: $_identifiedLiveness',
+                      //       style: const TextStyle(fontSize: 18),
+                      //     )
+                      //   ],
+                      // ),
+                      // const SizedBox(
+                      //   height: 10,
+                      // ),
+                      // Row(
+                      //   children: [
+                      //     const SizedBox(
+                      //       width: 16,
+                      //     ),
+                      //     Text(
+                      //       'Yaw: $_identifiedYaw',
+                      //       style: const TextStyle(fontSize: 18),
+                      //     )
+                      //   ],
+                      // ),
+                      // const SizedBox(
+                      //   height: 10,
+                      // ),
+                      // Row(
+                      //   children: [
+                      //     const SizedBox(
+                      //       width: 16,
+                      //     ),
+                      //     Text(
+                      //       'Roll: $_identifiedRoll',
+                      //       style: const TextStyle(fontSize: 18),
+                      //     )
+                      //   ],
+                      // ),
+                      // const SizedBox(
+                      //   height: 10,
+                      // ),
+                      // Row(
+                      //   children: [
+                      //     const SizedBox(
+                      //       width: 16,
+                      //     ),
+                      //     Text(
+                      //       'Pitch: $_identifiedPitch',
+                      //       style: const TextStyle(fontSize: 18),
+                      //     )
+                      //   ],
+                      // ),
+                      // const SizedBox(height: 16),
+                      // ElevatedButton(
+                      //   style: ElevatedButton.styleFrom(
+                      //     backgroundColor: Theme.of(context).colorScheme.primaryContainer,
+                      //   ),
+                      //   onPressed: () => faceRecognitionStart(),
+                      //   child: const Text('Try again'),
+                      // ),
+                    ],
+                  ),
+                ),
+              ),
+            ),
           ],
         ),
       ),
@@ -322,8 +530,7 @@ class FaceRecognitionViewState extends State<FaceRecognitionView> {
   }
 }
 
-class FaceDetectionView extends StatefulWidget
-    implements FaceDetectionInterface {
+class FaceDetectionView extends StatefulWidget implements FaceDetectionInterface {
   FaceRecognitionViewState faceRecognitionViewState;
 
   FaceDetectionView({super.key, required this.faceRecognitionViewState});
@@ -357,18 +564,14 @@ class _FaceDetectionViewState extends State<FaceDetectionView> {
     final prefs = await SharedPreferences.getInstance();
     var cameraLens = prefs.getInt("camera_lens");
 
-    widget.faceRecognitionViewState.faceDetectionViewController =
-        FaceDetectionViewController(id, widget);
+    widget.faceRecognitionViewState.faceDetectionViewController = FaceDetectionViewController(id, widget);
 
-    await widget.faceRecognitionViewState.faceDetectionViewController
-        ?.initHandler();
+    await widget.faceRecognitionViewState.faceDetectionViewController?.initHandler();
 
     int? livenessLevel = prefs.getInt("liveness_level");
-    await widget.faceRecognitionViewState._facesdkPlugin
-        .setParam({'check_liveness_level': livenessLevel ?? 0});
+    await widget.faceRecognitionViewState._facesdkPlugin.setParam({'check_liveness_level': livenessLevel ?? 0});
 
-    await widget.faceRecognitionViewState.faceDetectionViewController
-        ?.startCamera(cameraLens ?? 1);
+    await widget.faceRecognitionViewState.faceDetectionViewController?.startCamera(cameraLens ?? 1);
   }
 }
 
@@ -399,20 +602,15 @@ class FacePainter extends CustomPainter {
           title = "Real " + face['liveness'].toString();
         }
 
-        TextSpan span =
-            TextSpan(style: TextStyle(color: color, fontSize: 20), text: title);
-        TextPainter tp = TextPainter(
-            text: span,
-            textAlign: TextAlign.left,
-            textDirection: TextDirection.ltr);
+        TextSpan span = TextSpan(style: TextStyle(color: color, fontSize: 20), text: title);
+        TextPainter tp = TextPainter(text: span, textAlign: TextAlign.left, textDirection: TextDirection.ltr);
         tp.layout();
         tp.paint(canvas, Offset(face['x1'] / xScale, face['y1'] / yScale - 30));
 
         paint.color = color;
         canvas.drawRect(
             Offset(face['x1'] / xScale, face['y1'] / yScale) &
-                Size((face['x2'] - face['x1']) / xScale,
-                    (face['y2'] - face['y1']) / yScale),
+                Size((face['x2'] - face['x1']) / xScale, (face['y2'] - face['y1']) / yScale),
             paint);
       }
     }

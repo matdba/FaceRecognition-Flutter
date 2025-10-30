@@ -1,16 +1,16 @@
 import 'dart:async';
 
+import 'package:facerecognition_flutter/presentation/controllers/home/home_controller.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/cupertino.dart';
+import 'package:get/get.dart';
+import 'package:get/route_manager.dart';
 import 'package:settings_ui/settings_ui.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:fluttertoast/fluttertoast.dart';
-import 'main.dart';
 
 class SettingsPage extends StatefulWidget {
-  final MyHomePageState homePageState;
-
-  const SettingsPage({super.key, required this.homePageState});
+  const SettingsPage({super.key});
 
   @override
   SettingsPageState createState() => SettingsPageState();
@@ -217,8 +217,7 @@ class SettingsPageState extends State<SettingsPage> {
                       });
                       updateLivenessLevel(selectedItem);
                     },
-                    children: List<Widget>.generate(_livenessLevelNames.length,
-                        (int index) {
+                    children: List<Widget>.generate(_livenessLevelNames.length, (int index) {
                       return Center(child: Text(_livenessLevelNames[index]));
                     }),
                   ),
@@ -288,7 +287,7 @@ class SettingsPageState extends State<SettingsPage> {
                 title: const Text('Clear all person'),
                 leading: const Icon(Icons.clear_all),
                 onPressed: (value) {
-                  widget.homePageState.deleteAllPerson();
+                  Get.find<HomeController>().deleteAllPerson();
                 },
               ),
             ],
